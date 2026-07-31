@@ -14,6 +14,40 @@ const VOLUME_CACHE_TTL: Duration = Duration::from_secs(5);
 /// How long to wait for a freshly launched Spotify to appear as a Connect device.
 const DEVICE_WAIT: Duration = Duration::from_secs(15);
 
+/// What an action actually did, for the on-screen readout. Derived from the
+/// outcome rather than the keypress, so the volume shown is the level Spotify
+/// ended up at and play/pause reflects the state we actually reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feedback {
+    Playing,
+    Paused,
+    NextTrack,
+    PreviousTrack,
+    Volume(u8),
+}
+
+impl Feedback {
+    pub fn label(self) -> String {
+        match self {
+            Feedback::Playing => "playing".into(),
+            Feedback::Paused => "paused".into(),
+            Feedback::NextTrack => "skipped to next".into(),
+            Feedback::PreviousTrack => "skipped to previous".into(),
+            Feedback::Volume(percent) => format!("volume {percent}%"),
+        }
+    }
+
+    /// How long the readout should sit on screen. Volume comes in bursts and is
+    /// its own confirmation, so it goes sooner; a skip or a pause is a discrete
+    /// act worth a beat longer.
+    pub fn hold(self) -> Duration {
+        match self {
+            Feedback::Volume(_) => Duration::from_millis(500),
+            _ => Duration::from_millis(850),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct VolumeCache {
     device_id: Option<String>,
@@ -42,22 +76,33 @@ impl<T: TokenProvider> Controller<T> {
         &self.client
     }
 
-    pub async fn handle(&self, action: Action) -> Result<()> {
+    /// Apply `detents` worth of volume in a single write.
+    ///
+    /// A knob emits presses far faster than the API can answer them, so they
+    /// are accumulated upstream and arrive here as one signed count. Doing it
+    /// this way also keeps the level from lurching: one read-modify-write per
+    /// burst cannot interleave with itself the way twenty of them would.
+    pub async fn nudge_volume_by(&self, detents: i32) -> Result<Feedback> {
+        let step = (detents * self.volume_step as i32).clamp(-100, 100) as i16;
+        self.nudge_volume(step).await
+    }
+
+    pub async fn handle(&self, action: Action) -> Result<Feedback> {
         match action {
-            Action::VolumeUp => self.nudge_volume(self.volume_step as i16).await,
-            Action::VolumeDown => self.nudge_volume(-(self.volume_step as i16)).await,
+            Action::VolumeUp => self.nudge_volume_by(1).await,
+            Action::VolumeDown => self.nudge_volume_by(-1).await,
             Action::PlayPause => self.toggle_play_pause().await,
             Action::NextTrack => {
-                self.ensure_target().await?;
-                self.client.next_track().await?;
+                let device = self.ensure_target().await?;
+                self.client.next_track(device.id.as_deref()).await?;
                 self.invalidate_volume_cache();
-                Ok(())
+                Ok(Feedback::NextTrack)
             }
             Action::PreviousTrack => {
-                self.ensure_target().await?;
-                self.client.previous_track().await?;
+                let device = self.ensure_target().await?;
+                self.client.previous_track(device.id.as_deref()).await?;
                 self.invalidate_volume_cache();
-                Ok(())
+                Ok(Feedback::PreviousTrack)
             }
         }
     }
@@ -88,7 +133,7 @@ impl<T: TokenProvider> Controller<T> {
         }
     }
 
-    async fn nudge_volume(&self, step: i16) -> Result<()> {
+    async fn nudge_volume(&self, step: i16) -> Result<Feedback> {
         let (device_id, current) = match self.cached_volume() {
             Some(hit) => hit,
             None => {
@@ -109,7 +154,8 @@ impl<T: TokenProvider> Controller<T> {
         let target = adjust_volume(current, step);
         if target == current {
             tracing::debug!(current, "already at the volume limit");
-            return Ok(());
+            // Still worth showing: the readout confirms the key registered.
+            return Ok(Feedback::Volume(current));
         }
 
         self.client
@@ -117,29 +163,30 @@ impl<T: TokenProvider> Controller<T> {
             .await?;
         self.store_volume(device_id, target);
         tracing::info!(from = current, to = target, "volume");
-        Ok(())
+        Ok(Feedback::Volume(target))
     }
 
-    async fn toggle_play_pause(&self) -> Result<()> {
-        match self.client.playback_state().await? {
-            Some(state) if state.is_playing => {
-                self.client.pause().await?;
-                tracing::info!("paused");
-            }
-            // A session can outlive its device (client closed, network dropped),
-            // in which case an untargeted play just 404s.
-            Some(state) if state.device.as_ref().is_some_and(|d| d.id.is_some()) => {
-                self.client.play().await?;
-                tracing::info!("playing");
-            }
-            _ => {
-                // Nothing usable to talk to — adopt a device, then start it.
-                self.ensure_target().await?;
-                self.client.play().await?;
-                tracing::info!("playing");
-            }
+    async fn toggle_play_pause(&self) -> Result<Feedback> {
+        let state = self.client.playback_state().await?;
+
+        if let Some(playing) = &state
+            && playing.is_playing
+        {
+            let id = playing.device.as_ref().and_then(|d| d.id.as_deref());
+            self.client.pause(id).await?;
+            tracing::info!("paused");
+            return Ok(Feedback::Paused);
         }
-        Ok(())
+
+        // Paused with a device we can still address, or nothing usable at all —
+        // a session can outlive its device (client closed, network dropped).
+        let device_id = match state.and_then(|s| s.device).filter(|d| d.id.is_some()) {
+            Some(device) => device.id,
+            None => self.ensure_target().await?.id,
+        };
+        self.client.play(device_id.as_deref()).await?;
+        tracing::info!("playing");
+        Ok(Feedback::Playing)
     }
 
     /// Resolve a device we can send commands to, activating one if needed.

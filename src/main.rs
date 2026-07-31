@@ -3,9 +3,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use spotify_control::auth::FileTokenProvider;
 use spotify_control::config::{self, Config};
-use spotify_control::controller::Controller;
+use spotify_control::controller::{Controller, Feedback};
 use spotify_control::hotkeys::{self, Action, Debouncer, HotkeyRegistry};
 use spotify_control::logging;
+use spotify_control::osd;
 use spotify_control::service;
 use spotify_control::spotify::{SpotifyClient, SCOPES};
 use std::collections::HashMap;
@@ -199,11 +200,16 @@ async fn cmd_login() -> Result<()> {
 
 async fn cmd_send(action: Action) -> Result<()> {
     let cfg = Config::load()?;
-    build_controller(&cfg)?
+    let feedback = build_controller(&cfg)?
         .handle(action)
         .await
         .with_context(|| format!("{} failed", action.label()))?;
     println!("{} sent", action.label());
+
+    // The popup lives on its own thread, so a one-shot command has to outlast
+    // it deliberately or the process exits before anything is drawn.
+    osd::show(&feedback.label(), feedback.hold());
+    tokio::time::sleep(feedback.hold() + osd::FADE_TAIL).await;
     Ok(())
 }
 
@@ -347,6 +353,36 @@ fn run_daemon() -> Result<()> {
 /// queued behind it is a re-press rather than fresh intent.
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How long to keep gathering volume presses before writing.
+///
+/// A knob bound to the volume keys emits detents far faster than the Web API
+/// can answer, so a spin becomes one request instead of twenty. Crucially this
+/// *accumulates* rather than throttles: every detent still counts, so the knob
+/// stays 1:1 with the level instead of silently losing turns.
+const VOLUME_COALESCE: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn volume_detent(action: Action) -> Option<i32> {
+    match action {
+        Action::VolumeUp => Some(1),
+        Action::VolumeDown => Some(-1),
+        _ => None,
+    }
+}
+
+fn pressed_action(id_map: &HashMap<u32, Action>, event: GlobalHotKeyEvent) -> Option<Action> {
+    if event.state != HotKeyState::Pressed {
+        return None;
+    }
+    id_map.get(&event.id).copied()
+}
+
+fn report(action: Action, outcome: Result<Feedback>) {
+    match outcome {
+        Ok(feedback) => osd::show(&feedback.label(), feedback.hold()),
+        Err(e) => tracing::error!("{} failed: {e:#}", action.label()),
+    }
+}
+
 fn action_worker(cfg: Config, id_map: HashMap<u32, Action>) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -355,14 +391,53 @@ fn action_worker(cfg: Config, id_map: HashMap<u32, Action>) -> Result<()> {
     let mut debouncer = Debouncer::new();
     let receiver = GlobalHotKeyEvent::receiver();
 
+    // A non-volume press that interrupted a volume burst, to run next.
+    let mut deferred: Option<Action> = None;
+
     loop {
-        let event = receiver.recv().context("hotkey channel closed")?;
-        if event.state != HotKeyState::Pressed {
+        let action = match deferred.take() {
+            Some(action) => action,
+            None => {
+                let event = receiver.recv().context("hotkey channel closed")?;
+                match pressed_action(&id_map, event) {
+                    Some(action) => action,
+                    None => continue,
+                }
+            }
+        };
+
+        // Volume is coalesced, not debounced: the window below is what keeps the
+        // request rate sane, so no detent has to be thrown away to protect it.
+        if let Some(first) = volume_detent(action) {
+            let mut detents = first;
+            let deadline = std::time::Instant::now() + VOLUME_COALESCE;
+
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let Ok(event) = receiver.recv_timeout(remaining) else {
+                    break;
+                };
+                match pressed_action(&id_map, event) {
+                    Some(next) => match volume_detent(next) {
+                        Some(detent) => detents += detent,
+                        // Don't swallow a skip that lands mid-spin.
+                        None => {
+                            deferred = Some(next);
+                            break;
+                        }
+                    },
+                    None => continue,
+                }
+            }
+
+            tracing::debug!(detents, "applying coalesced volume");
+            report(action, runtime.block_on(controller.nudge_volume_by(detents)));
             continue;
         }
-        let Some(&action) = id_map.get(&event.id) else {
-            continue;
-        };
+
         if !debouncer.allow(action) {
             tracing::debug!("throttled repeat of {}", action.label());
             continue;
@@ -370,9 +445,7 @@ fn action_worker(cfg: Config, id_map: HashMap<u32, Action>) -> Result<()> {
 
         // One action at a time; a failed action must not take the daemon down.
         let started = std::time::Instant::now();
-        if let Err(e) = runtime.block_on(controller.handle(action)) {
-            tracing::error!("{} failed: {e:#}", action.label());
-        }
+        report(action, runtime.block_on(controller.handle(action)));
 
         // Launching Spotify and waiting for it to appear can take ~15s, and a
         // user who sees nothing happen presses again. Those presses queue up and

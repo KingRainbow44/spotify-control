@@ -1,5 +1,9 @@
 # spotify-control
 
+> [!NOTE]
+> This is a **vibecoded project** done with Opus 4.8/5.
+> Use at your own discretion.
+
 Global media hotkeys for Spotify. The bindings drive your **active Spotify Connect device**
 through the Web API, so they work even when the music is playing on a different machine,
 your phone, or a speaker.
@@ -152,19 +156,32 @@ written `0600`; on Windows it inherits the user-profile ACL.
 
 ## Behavior notes
 
+- **On-screen readout** (Windows). Every action flashes a small pill near the bottom of whichever
+  monitor holds the cursor — `playing`, `paused`, `skipped to next`, `volume 45%`. It reports what
+  actually happened rather than what was pressed, so the percentage is the level Spotify landed on.
+  Volume clears after 500 ms, everything else after 850 ms, and a new action replaces whatever is
+  on screen instead of queueing behind it. It never takes focus and clicks pass straight through.
 - **No active device.** If Spotify knows about an idle device, it is adopted silently. If it knows
   of none, the local desktop client is launched and adopted once it appears.
 - **Volume.** Read-modify-write against the active device, clamped to 0–100. The level is cached
-  for 5 seconds so holding a key ramps smoothly without a request per repeat.
+  for 5 seconds so a burst ramps smoothly without a request per press.
+- **Volume in bulk.** Presses are gathered for 100 ms and applied as one write. A knob or an
+  auto-repeating key emits detents far faster than the Web API answers, so they are *accumulated*
+  rather than thrown away: every detent counts, the level tracks the input instead of lurching,
+  and one burst costs one request. A skip that lands mid-burst runs straight after, not lost.
 - **Fixed-volume devices.** Some Connect targets (TVs, certain speakers) report
   `supports_volume: false` and will refuse volume changes with a clear error.
-- **Rate limiting.** Repeats are throttled — 120 ms for volume, 400 ms for track changes — so a
-  held key cannot trip Spotify's 429s.
+- **Rate limiting.** Track changes and play/pause are throttled to one every 400 ms, so a held key
+  cannot trip Spotify's 429s. Volume needs no such limit — coalescing already bounds it.
 
 ## Known conflicts
 
-- `Ctrl` + `Alt` + `Left`/`Right` is also used by some Intel graphics drivers for screen rotation.
-  Disable those hotkeys in Intel Graphics Command Center if arrows rotate your display.
+- `Ctrl` + `Alt` + arrow keys are claimed by the display-rotation hotkeys in some graphics drivers
+  (Intel's and NVIDIA's both), and by other software that hooks the keyboard. These grab the keys
+  *below* `RegisterHotKey`, so the binding registers cleanly, the daemon logs a normal startup, and
+  the key then simply never fires — expect silence rather than an error. If the screen rotates, the
+  driver is the culprit; disable its rotation hotkeys, or remap the binding. Adding a modifier is
+  usually enough to dodge it: `Ctrl+Super+Alt` + arrow survives where `Ctrl+Alt` + arrow does not.
 - Linux support is **X11 only**. Wayland does not permit global hotkey grabs through this
   mechanism.
 

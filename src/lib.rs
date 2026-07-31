@@ -7,5 +7,6 @@ pub mod controller;
 pub mod hotkeys;
 pub mod launcher;
 pub mod logging;
+pub mod osd;
 pub mod service;
 pub mod spotify;

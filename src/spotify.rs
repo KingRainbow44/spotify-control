@@ -97,6 +97,15 @@ pub fn pick_fallback_device(devices: &[Device]) -> Option<&Device> {
         .or_else(|| devices.iter().find(|d| !d.is_restricted && d.id.is_some()))
 }
 
+/// Address a command at a specific device rather than relying on Spotify's
+/// notion of the "active" one. A device that was just transferred to isn't
+/// active yet — an untargeted command 404s and reads back as "no active device".
+fn device_query(device_id: Option<&str>) -> Vec<(&'static str, String)> {
+    device_id
+        .map(|id| vec![("device_id", id.to_string())])
+        .unwrap_or_default()
+}
+
 pub struct SpotifyClient<T: TokenProvider> {
     http: reqwest::Client,
     base_url: String,
@@ -181,35 +190,53 @@ impl<T: TokenProvider> SpotifyClient<T> {
 
     pub async fn set_volume(&self, percent: u8, device_id: Option<&str>) -> Result<()> {
         let mut query = vec![("volume_percent", percent.to_string())];
-        if let Some(id) = device_id {
-            query.push(("device_id", id.to_string()));
-        }
+        query.extend(device_query(device_id));
         self.send(reqwest::Method::PUT, "/v1/me/player/volume", &query, None)
             .await?;
         Ok(())
     }
 
-    pub async fn next_track(&self) -> Result<()> {
-        self.send(reqwest::Method::POST, "/v1/me/player/next", &[], None)
-            .await?;
+    pub async fn next_track(&self, device_id: Option<&str>) -> Result<()> {
+        self.send(
+            reqwest::Method::POST,
+            "/v1/me/player/next",
+            &device_query(device_id),
+            None,
+        )
+        .await?;
         Ok(())
     }
 
-    pub async fn previous_track(&self) -> Result<()> {
-        self.send(reqwest::Method::POST, "/v1/me/player/previous", &[], None)
-            .await?;
+    pub async fn previous_track(&self, device_id: Option<&str>) -> Result<()> {
+        self.send(
+            reqwest::Method::POST,
+            "/v1/me/player/previous",
+            &device_query(device_id),
+            None,
+        )
+        .await?;
         Ok(())
     }
 
-    pub async fn play(&self) -> Result<()> {
-        self.send(reqwest::Method::PUT, "/v1/me/player/play", &[], None)
-            .await?;
+    pub async fn play(&self, device_id: Option<&str>) -> Result<()> {
+        self.send(
+            reqwest::Method::PUT,
+            "/v1/me/player/play",
+            &device_query(device_id),
+            None,
+        )
+        .await?;
         Ok(())
     }
 
-    pub async fn pause(&self) -> Result<()> {
-        self.send(reqwest::Method::PUT, "/v1/me/player/pause", &[], None)
-            .await?;
+    pub async fn pause(&self, device_id: Option<&str>) -> Result<()> {
+        self.send(
+            reqwest::Method::PUT,
+            "/v1/me/player/pause",
+            &device_query(device_id),
+            None,
+        )
+        .await?;
         Ok(())
     }
 

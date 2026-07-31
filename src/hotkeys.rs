@@ -24,15 +24,6 @@ impl Action {
         }
     }
 
-    /// Minimum gap between repeats. Windows auto-repeats a held hotkey, and each
-    /// action costs API calls, so unthrottled repeats would trip Spotify's 429s.
-    /// Volume is deliberately loose so a held key still ramps smoothly.
-    pub fn min_interval(self) -> std::time::Duration {
-        match self {
-            Action::VolumeUp | Action::VolumeDown => std::time::Duration::from_millis(120),
-            _ => std::time::Duration::from_millis(400),
-        }
-    }
 }
 
 impl Action {
@@ -98,7 +89,15 @@ pub fn describe_bindings(bindings: &Bindings) -> Vec<(Action, String)> {
         .collect()
 }
 
-/// Drops hotkey repeats that arrive faster than an action's minimum interval.
+/// Minimum gap between repeats. Windows auto-repeats a held hotkey, and each
+/// action costs API calls, so unthrottled repeats would trip Spotify's 429s.
+///
+/// Volume does not come through here — it is accumulated and applied in bulk by
+/// the daemon instead, so that a knob's detents are all counted rather than
+/// thrown away.
+const REPEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Drops hotkey repeats that arrive faster than [`REPEAT_INTERVAL`].
 #[derive(Default)]
 pub struct Debouncer {
     last: HashMap<Action, std::time::Instant>,
@@ -116,7 +115,7 @@ impl Debouncer {
     /// Clock is injected so the throttling rules can be tested without sleeping.
     pub fn allow_at(&mut self, action: Action, now: std::time::Instant) -> bool {
         match self.last.get(&action) {
-            Some(&prev) if now.duration_since(prev) < action.min_interval() => false,
+            Some(&prev) if now.duration_since(prev) < REPEAT_INTERVAL => false,
             _ => {
                 self.last.insert(action, now);
                 true
@@ -403,11 +402,6 @@ mod tests {
     }
 
     #[test]
-    fn track_actions_are_throttled_harder_than_volume() {
-        assert!(Action::NextTrack.min_interval() > Action::VolumeUp.min_interval());
-    }
-
-    #[test]
     fn debouncer_allows_the_first_press() {
         let mut d = Debouncer::new();
         assert!(d.allow_at(Action::NextTrack, std::time::Instant::now()));
@@ -434,26 +428,18 @@ mod tests {
     fn debouncer_tracks_actions_independently() {
         let mut d = Debouncer::new();
         let t0 = std::time::Instant::now();
-        assert!(d.allow_at(Action::VolumeUp, t0));
-        // A different action must not be throttled by the first one.
-        assert!(d.allow_at(Action::VolumeDown, t0));
         assert!(d.allow_at(Action::NextTrack, t0));
+        // A different action must not be throttled by the first one.
+        assert!(d.allow_at(Action::PreviousTrack, t0));
+        assert!(d.allow_at(Action::PlayPause, t0));
     }
 
     #[test]
-    fn debouncer_lets_volume_ramp_faster_than_track_skips() {
+    fn a_held_key_does_not_skip_a_pile_of_tracks() {
         let mut d = Debouncer::new();
         let t0 = std::time::Instant::now();
-        let later = t0 + Duration::from_millis(150);
-
-        assert!(d.allow_at(Action::VolumeUp, t0));
-        assert!(d.allow_at(Action::VolumeUp, later), "held volume key should ramp");
-
         assert!(d.allow_at(Action::NextTrack, t0));
-        assert!(
-            !d.allow_at(Action::NextTrack, later),
-            "held arrow should not skip a pile of tracks"
-        );
+        assert!(!d.allow_at(Action::NextTrack, t0 + Duration::from_millis(150)));
     }
 
     #[test]

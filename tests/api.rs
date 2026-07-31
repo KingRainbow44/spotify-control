@@ -2,7 +2,7 @@
 //! These cover the request shapes and error mapping that unit tests can't reach.
 
 use serde_json::json;
-use spotify_control::controller::Controller;
+use spotify_control::controller::{Controller, Feedback};
 use spotify_control::hotkeys::Action;
 use spotify_control::spotify::{SpotifyClient, SpotifyError, StaticToken, TokenProvider};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -224,7 +224,7 @@ async fn a_401_triggers_exactly_one_retry_with_a_fresh_token() {
         RotatingToken { generation: AtomicUsize::new(0) },
         server.uri(),
     );
-    client.next_track().await.unwrap();
+    client.next_track(None).await.unwrap();
 }
 
 #[tokio::test]
@@ -242,7 +242,7 @@ async fn a_persistent_401_surfaces_as_unauthorized() {
 
     let client = SpotifyClient::with_base_url(StaticToken("t".into()), server.uri());
     assert!(matches!(
-        client.next_track().await.unwrap_err(),
+        client.next_track(None).await.unwrap_err(),
         SpotifyError::Unauthorized
     ));
 }
@@ -259,7 +259,7 @@ async fn a_403_reports_the_spotify_message() {
         .await;
 
     let client = SpotifyClient::with_base_url(StaticToken("t".into()), server.uri());
-    let err = client.pause().await.unwrap_err();
+    let err = client.pause(None).await.unwrap_err();
     assert!(format!("{err}").contains("Premium required"), "got: {err}");
 }
 
@@ -274,7 +274,7 @@ async fn a_404_maps_to_no_active_device() {
 
     let client = SpotifyClient::with_base_url(StaticToken("t".into()), server.uri());
     assert!(matches!(
-        client.next_track().await.unwrap_err(),
+        client.next_track(None).await.unwrap_err(),
         SpotifyError::NoActiveDevice
     ));
 }
@@ -289,7 +289,7 @@ async fn a_429_preserves_the_retry_after_delay() {
         .await;
 
     let client = SpotifyClient::with_base_url(StaticToken("t".into()), server.uri());
-    match client.next_track().await.unwrap_err() {
+    match client.next_track(None).await.unwrap_err() {
         SpotifyError::RateLimited(secs) => assert_eq!(secs, 30),
         other => panic!("expected RateLimited, got {other:?}"),
     }
@@ -305,7 +305,7 @@ async fn non_json_error_bodies_do_not_panic() {
         .await;
 
     let client = SpotifyClient::with_base_url(StaticToken("t".into()), server.uri());
-    match client.next_track().await.unwrap_err() {
+    match client.next_track(None).await.unwrap_err() {
         SpotifyError::Api { status, message } => {
             assert_eq!(status, 502);
             assert!(message.contains("Bad Gateway"));
@@ -323,6 +323,7 @@ async fn play_pause_pauses_while_playing() {
 
     Mock::given(method("PUT"))
         .and(path("/v1/me/player/pause"))
+        .and(query_param("device_id", "dev1"))
         .respond_with(ResponseTemplate::new(204))
         .expect(1)
         .mount(&server)
@@ -338,6 +339,7 @@ async fn play_pause_resumes_while_paused() {
 
     Mock::given(method("PUT"))
         .and(path("/v1/me/player/play"))
+        .and(query_param("device_id", "dev1"))
         .respond_with(ResponseTemplate::new(204))
         .expect(1)
         .mount(&server)
@@ -380,8 +382,11 @@ async fn play_pause_adopts_a_device_when_the_session_has_none() {
         .mount(&server)
         .await;
 
+    // Targeted at the device we just adopted. A transfer does not make a device
+    // active immediately, so an untargeted play 404s as "no active device".
     Mock::given(method("PUT"))
         .and(path("/v1/me/player/play"))
+        .and(query_param("device_id", "idle1"))
         .respond_with(ResponseTemplate::new(204))
         .expect(1)
         .mount(&server)
@@ -397,6 +402,7 @@ async fn previous_track_hits_the_previous_endpoint() {
 
     Mock::given(method("POST"))
         .and(path("/v1/me/player/previous"))
+        .and(query_param("device_id", "dev1"))
         .respond_with(ResponseTemplate::new(204))
         .expect(1)
         .mount(&server)
@@ -451,6 +457,81 @@ async fn adopts_an_idle_device_when_nothing_is_active() {
         .await;
 
     controller(&server, 5).handle(Action::VolumeUp).await.unwrap();
+}
+
+// ------------------------------------------------- coalesced volume bursts ---
+
+#[tokio::test]
+async fn a_burst_of_detents_becomes_a_single_write() {
+    let server = MockServer::start().await;
+    mock_player(&server, 50, true).await;
+
+    // Four detents at 5% each, in one request rather than four.
+    Mock::given(method("PUT"))
+        .and(path("/v1/me/player/volume"))
+        .and(query_param("volume_percent", "70"))
+        .and(query_param("device_id", "dev1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let feedback = controller(&server, 5).nudge_volume_by(4).await.unwrap();
+    assert_eq!(feedback, Feedback::Volume(70));
+}
+
+#[tokio::test]
+async fn a_burst_that_nets_downwards_writes_the_lower_level() {
+    let server = MockServer::start().await;
+    mock_player(&server, 50, true).await;
+
+    Mock::given(method("PUT"))
+        .and(path("/v1/me/player/volume"))
+        .and(query_param("volume_percent", "40"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // Spun down five, back up three.
+    let feedback = controller(&server, 5).nudge_volume_by(-2).await.unwrap();
+    assert_eq!(feedback, Feedback::Volume(40));
+}
+
+#[tokio::test]
+async fn a_burst_big_enough_to_overshoot_clamps_to_the_rail() {
+    let server = MockServer::start().await;
+    mock_player(&server, 50, true).await;
+
+    Mock::given(method("PUT"))
+        .and(path("/v1/me/player/volume"))
+        .and(query_param("volume_percent", "100"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // A fast spin can easily exceed the remaining headroom.
+    let feedback = controller(&server, 5).nudge_volume_by(40).await.unwrap();
+    assert_eq!(feedback, Feedback::Volume(100));
+}
+
+#[tokio::test]
+async fn detents_that_cancel_out_write_nothing() {
+    let server = MockServer::start().await;
+    mock_player(&server, 50, true).await;
+
+    // No volume mock: an equal spin each way must not touch the API at all,
+    // but should still report the level so the readout confirms the input.
+    let feedback = controller(&server, 5).nudge_volume_by(0).await.unwrap();
+    assert_eq!(feedback, Feedback::Volume(50));
+}
+
+#[tokio::test]
+async fn the_volume_readout_clears_sooner_than_a_skip() {
+    // Volume arrives in bursts and is self-evident; a skip deserves a beat.
+    assert!(Feedback::Volume(50).hold() < Feedback::NextTrack.hold());
+    assert!(Feedback::Volume(50).hold() < Feedback::Paused.hold());
 }
 
 #[tokio::test]
