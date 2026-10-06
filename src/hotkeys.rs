@@ -24,6 +24,20 @@ impl Action {
         }
     }
 
+    /// Stable name for the action outside this process. Matches the config keys.
+    pub fn id(self) -> &'static str {
+        match self {
+            Action::VolumeUp => "volume_up",
+            Action::VolumeDown => "volume_down",
+            Action::PlayPause => "play_pause",
+            Action::NextTrack => "next_track",
+            Action::PreviousTrack => "previous_track",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Action> {
+        ALL_ACTIONS.into_iter().find(|a| a.id() == id)
+    }
 }
 
 impl Action {
@@ -87,6 +101,50 @@ pub fn describe_bindings(bindings: &Bindings) -> Vec<(Action, String)> {
         .into_iter()
         .map(|a| (a, a.spec(bindings).replace('+', " + ")))
         .collect()
+}
+
+/// A binding in the XDG shortcuts notation the GlobalShortcuts portal takes as
+/// a preferred trigger, e.g. `CTRL+ALT+Right`. `None` for keys it can't name.
+pub fn xdg_trigger(spec: &str) -> Option<String> {
+    use global_hotkey::hotkey::{Code, Modifiers};
+
+    let hotkey: HotKey = spec.parse().ok()?;
+    let name = hotkey.key.to_string();
+    let key = match hotkey.key {
+        Code::ArrowLeft => "Left".to_string(),
+        Code::ArrowRight => "Right".to_string(),
+        Code::ArrowUp => "Up".to_string(),
+        Code::ArrowDown => "Down".to_string(),
+        Code::PageUp => "Page_Up".to_string(),
+        Code::PageDown => "Page_Down".to_string(),
+        Code::Space => "space".to_string(),
+        Code::Home | Code::End | Code::Insert | Code::Delete => name,
+        _ => {
+            if let Some(letter) = name.strip_prefix("Key") {
+                letter.to_lowercase()
+            } else if let Some(digit) = name.strip_prefix("Digit") {
+                digit.to_string()
+            } else if name.starts_with('F') && name[1..].parse::<u8>().is_ok() {
+                name
+            } else {
+                return None;
+            }
+        }
+    };
+
+    let mut parts = Vec::new();
+    for (modifier, label) in [
+        (Modifiers::CONTROL, "CTRL"),
+        (Modifiers::ALT, "ALT"),
+        (Modifiers::SHIFT, "SHIFT"),
+        (Modifiers::SUPER, "LOGO"),
+    ] {
+        if hotkey.mods.contains(modifier) {
+            parts.push(label.to_string());
+        }
+    }
+    parts.push(key);
+    Some(parts.join("+"))
 }
 
 /// Minimum gap between repeats. Windows auto-repeats a held hotkey, and each
@@ -180,10 +238,6 @@ impl HotkeyRegistry {
 
     pub fn action_for(&self, id: u32) -> Option<Action> {
         self.by_id.get(&id).copied()
-    }
-
-    pub fn id_map(&self) -> HashMap<u32, Action> {
-        self.by_id.clone()
     }
 
     pub fn conflicts(&self) -> &[Conflict] {
@@ -293,7 +347,7 @@ mod tests {
     use global_hotkey::hotkey::{Code, Modifiers};
 
     const CTRL_ALT: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT);
-    const CTRL_ALT_SUPER: Modifiers = CTRL_ALT.union(Modifiers::SUPER);
+    const CTRL_ALT_SHIFT: Modifiers = CTRL_ALT.union(Modifiers::SHIFT);
 
     #[test]
     fn all_five_bindings_are_present() {
@@ -315,14 +369,14 @@ mod tests {
         assert_eq!(map[&Action::PlayPause].mods, CTRL_ALT);
 
         assert_eq!(map[&Action::NextTrack].key, Code::ArrowRight);
-        assert_eq!(map[&Action::NextTrack].mods, CTRL_ALT_SUPER);
+        assert_eq!(map[&Action::NextTrack].mods, CTRL_ALT_SHIFT);
 
         assert_eq!(map[&Action::PreviousTrack].key, Code::ArrowLeft);
-        assert_eq!(map[&Action::PreviousTrack].mods, CTRL_ALT_SUPER);
+        assert_eq!(map[&Action::PreviousTrack].mods, CTRL_ALT_SHIFT);
     }
 
     #[test]
-    fn plain_and_super_variants_stay_distinguishable() {
+    fn plain_and_shift_variants_stay_distinguishable() {
         // The ids derive from (mods, key), so the arrow-key pairs must differ —
         // otherwise volume and track-skip would be indistinguishable at dispatch.
         let map: HashMap<Action, HotKey> = default_bindings().into_iter().collect();
@@ -341,25 +395,49 @@ mod tests {
     }
 
     #[test]
-    fn super_modifier_is_only_on_track_bindings() {
+    fn shift_modifier_is_only_on_track_bindings() {
         for (action, hotkey) in default_bindings() {
-            let has_super = hotkey.mods.contains(Modifiers::SUPER);
+            let has_shift = hotkey.mods.contains(Modifiers::SHIFT);
             let expected = matches!(action, Action::NextTrack | Action::PreviousTrack);
-            assert_eq!(has_super, expected, "wrong SUPER modifier on {action:?}");
+            assert_eq!(has_shift, expected, "wrong SHIFT modifier on {action:?}");
+            // Hyprland setups put window moves on SUPER + CTRL + ALT + arrows.
+            assert!(!hotkey.mods.contains(Modifiers::SUPER), "SUPER on {action:?}");
         }
     }
 
     #[test]
-    fn accepts_win_and_cmd_spellings_of_the_super_key() {
-        let ctrl_alt_super_right = default_bindings()
-            .into_iter()
-            .find(|(a, _)| *a == Action::NextTrack)
-            .unwrap()
-            .1;
+    fn accepts_super_and_cmd_spellings_of_the_super_key() {
         for spec in ["Ctrl+Super+Alt+ArrowRight", "Ctrl+Cmd+Alt+ArrowRight"] {
             let parsed: HotKey = spec.parse().unwrap_or_else(|e| panic!("{spec}: {e}"));
-            assert_eq!(parsed.id(), ctrl_alt_super_right.id(), "{spec}");
+            assert_eq!(parsed.key, Code::ArrowRight, "{spec}");
+            assert_eq!(parsed.mods, CTRL_ALT.union(Modifiers::SUPER), "{spec}");
         }
+    }
+
+    #[test]
+    fn action_ids_round_trip() {
+        for action in ALL_ACTIONS {
+            assert_eq!(Action::from_id(action.id()), Some(action));
+        }
+        assert_eq!(Action::from_id("nope"), None);
+    }
+
+    #[test]
+    fn defaults_translate_to_xdg_triggers() {
+        let b = Bindings::default();
+        assert_eq!(xdg_trigger(&b.volume_up).as_deref(), Some("CTRL+ALT+Right"));
+        assert_eq!(xdg_trigger(&b.play_pause).as_deref(), Some("CTRL+ALT+Home"));
+        assert_eq!(xdg_trigger(&b.previous_track).as_deref(), Some("CTRL+ALT+SHIFT+Left"));
+    }
+
+    #[test]
+    fn xdg_triggers_cover_letters_digits_and_function_keys() {
+        assert_eq!(xdg_trigger("Super+KeyP").as_deref(), Some("LOGO+p"));
+        assert_eq!(xdg_trigger("Ctrl+Digit5").as_deref(), Some("CTRL+5"));
+        assert_eq!(xdg_trigger("Alt+F12").as_deref(), Some("ALT+F12"));
+        assert_eq!(xdg_trigger("Ctrl+PageDown").as_deref(), Some("CTRL+Page_Down"));
+        assert_eq!(xdg_trigger("Ctrl+Semicolon"), None);
+        assert_eq!(xdg_trigger("garbage"), None);
     }
 
     #[test]

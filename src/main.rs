@@ -10,6 +10,7 @@ use spotify_control::osd;
 use spotify_control::service;
 use spotify_control::spotify::{SpotifyClient, SCOPES};
 use std::collections::HashMap;
+use std::sync::mpsc::{self, Receiver};
 
 #[derive(Parser)]
 #[command(
@@ -306,10 +307,31 @@ fn cmd_service(command: ServiceCommand) -> Result<()> {
 
 fn run_daemon() -> Result<()> {
     let cfg = Config::load()?;
+    let (actions, presses) = mpsc::channel();
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if spotify_control::wayland::is_session() {
+        spawn_action_worker(cfg.clone(), presses)?;
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(spotify_control::wayland::listen(&cfg.bindings, actions));
+    }
+
+    // global-hotkey latches the handler on its first event, and the X11 backend
+    // can emit one as soon as a key is grabbed, so this goes in before registering.
+    let id_map: HashMap<u32, Action> = hotkeys::parse_bindings(&cfg.bindings)?
+        .into_iter()
+        .map(|(action, hotkey)| (hotkey.id(), action))
+        .collect();
+    GlobalHotKeyEvent::set_event_handler(Some(move |event| {
+        if let Some(action) = pressed_action(&id_map, event) {
+            let _ = actions.send(action);
+        }
+    }));
 
     // Register before spawning the worker so the user sees binding problems first.
     let registry = HotkeyRegistry::register_all(&cfg.bindings)?;
-    let id_map = registry.id_map();
 
     hotkeys::warn_if_privilege_limited();
 
@@ -333,20 +355,25 @@ fn run_daemon() -> Result<()> {
         );
     }
 
-    // API calls happen off the event-loop thread; the loop below must never block.
+    spawn_action_worker(cfg, presses)?;
+
+    // Keeps the registry alive for the life of the process; never returns.
+    let _registry = registry;
+    hotkeys::run_event_loop();
+}
+
+/// API calls happen off the event-loop thread; the event loop must never block.
+fn spawn_action_worker(cfg: Config, presses: Receiver<Action>) -> Result<()> {
     std::thread::Builder::new()
         .name("spotify-actions".into())
         .spawn(move || {
-            if let Err(e) = action_worker(cfg, id_map) {
+            if let Err(e) = action_worker(cfg, presses) {
                 tracing::error!("action worker stopped: {e:#}");
                 std::process::exit(1);
             }
         })
         .context("could not spawn the action worker thread")?;
-
-    // Keeps the registry alive for the life of the process; never returns.
-    let _registry = registry;
-    hotkeys::run_event_loop();
+    Ok(())
 }
 
 /// An action slower than this leaves the user staring at nothing, so anything
@@ -383,13 +410,12 @@ fn report(action: Action, outcome: Result<Feedback>) {
     }
 }
 
-fn action_worker(cfg: Config, id_map: HashMap<u32, Action>) -> Result<()> {
+fn action_worker(cfg: Config, receiver: Receiver<Action>) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let controller = build_controller(&cfg)?;
     let mut debouncer = Debouncer::new();
-    let receiver = GlobalHotKeyEvent::receiver();
 
     // A non-volume press that interrupted a volume burst, to run next.
     let mut deferred: Option<Action> = None;
@@ -397,13 +423,7 @@ fn action_worker(cfg: Config, id_map: HashMap<u32, Action>) -> Result<()> {
     loop {
         let action = match deferred.take() {
             Some(action) => action,
-            None => {
-                let event = receiver.recv().context("hotkey channel closed")?;
-                match pressed_action(&id_map, event) {
-                    Some(action) => action,
-                    None => continue,
-                }
-            }
+            None => receiver.recv().context("hotkey channel closed")?,
         };
 
         // Volume is coalesced, not debounced: the window below is what keeps the
@@ -417,19 +437,16 @@ fn action_worker(cfg: Config, id_map: HashMap<u32, Action>) -> Result<()> {
                 if remaining.is_zero() {
                     break;
                 }
-                let Ok(event) = receiver.recv_timeout(remaining) else {
+                let Ok(next) = receiver.recv_timeout(remaining) else {
                     break;
                 };
-                match pressed_action(&id_map, event) {
-                    Some(next) => match volume_detent(next) {
-                        Some(detent) => detents += detent,
-                        // Don't swallow a skip that lands mid-spin.
-                        None => {
-                            deferred = Some(next);
-                            break;
-                        }
-                    },
-                    None => continue,
+                match volume_detent(next) {
+                    Some(detent) => detents += detent,
+                    // Don't swallow a skip that lands mid-spin.
+                    None => {
+                        deferred = Some(next);
+                        break;
+                    }
                 }
             }
 

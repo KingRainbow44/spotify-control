@@ -10,3 +10,5 @@ pub mod logging;
 pub mod osd;
 pub mod service;
 pub mod spotify;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub mod wayland;

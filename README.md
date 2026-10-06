@@ -8,7 +8,7 @@ Global media hotkeys for Spotify. The bindings drive your **active Spotify Conne
 through the Web API, so they work even when the music is playing on a different machine,
 your phone, or a speaker.
 
-Primary target is Windows; macOS and Linux (X11) are supported.
+Primary target is Windows; macOS and Linux (X11 and Wayland) are supported.
 
 ## Bindings
 
@@ -17,10 +17,10 @@ Primary target is Windows; macOS and Linux (X11) are supported.
 | `Ctrl` + `Alt` + `Right` | Volume up |
 | `Ctrl` + `Alt` + `Left` | Volume down |
 | `Ctrl` + `Alt` + `Home` | Play / pause |
-| `Ctrl` + `Win` + `Alt` + `Right` | Next track |
-| `Ctrl` + `Win` + `Alt` + `Left` | Previous track |
+| `Ctrl` + `Shift` + `Alt` + `Right` | Next track |
+| `Ctrl` + `Shift` + `Alt` + `Left` | Previous track |
 
-On macOS, `Win` is `Cmd`. The bindings are claimed exclusively — while the daemon runs, other
+The bindings are claimed exclusively — while the daemon runs, other
 applications will not receive them.
 
 If another app already holds one of these combinations (a launcher like Raycast, a graphics-driver
@@ -79,6 +79,11 @@ spotify-control service uninstall
 | Windows | Task Scheduler logon task (`SpotifyControl`) |
 | macOS | launchd LaunchAgent (`~/Library/LaunchAgents`) |
 | Linux | systemd user unit (`systemctl --user`) |
+
+On Linux the unit restarts the daemon whenever it exits, backing off from 2 s to 10 s, and
+never gives up. The delay stays at 10 s for the rest of the session once reached. That covers the
+desktop portal or its backend restarting underneath it, as well as a daemon installed before
+`init` and `login`: it starts working within seconds of them.
 
 ### Windows: hotkeys over administrator windows
 
@@ -139,11 +144,14 @@ spotify-control run --verbose       # debug logging
     "volume_up": "Ctrl+Alt+ArrowRight",
     "volume_down": "Ctrl+Alt+ArrowLeft",
     "play_pause": "Ctrl+Alt+Home",
-    "next_track": "Ctrl+Super+Alt+ArrowRight",
-    "previous_track": "Ctrl+Super+Alt+ArrowLeft"
+    "next_track": "Ctrl+Shift+Alt+ArrowRight",
+    "previous_track": "Ctrl+Shift+Alt+ArrowLeft"
   }
 }
 ```
+
+`init` writes every binding out, so a `config.json` from an older version still has next/previous
+on `Ctrl+Super+Alt`. Change those two lines by hand to pick up the new defaults.
 
 Binding strings list modifiers first, joined by `+`. Recognised modifiers are `Ctrl`/`Control`,
 `Alt`, `Shift`, and `Super`/`Cmd`/`Command` (the Windows/Command key — `Win` is not accepted).
@@ -182,8 +190,32 @@ written `0600`; on Windows it inherits the user-profile ACL.
   the key then simply never fires — expect silence rather than an error. If the screen rotates, the
   driver is the culprit; disable its rotation hotkeys, or remap the binding. Adding a modifier is
   usually enough to dodge it: `Ctrl+Super+Alt` + arrow survives where `Ctrl+Alt` + arrow does not.
-- Linux support is **X11 only**. Wayland does not permit global hotkey grabs through this
-  mechanism.
+
+## Wayland
+
+Wayland has no global key grabs, so under a Wayland session (`WAYLAND_DISPLAY` set) the daemon
+registers its actions with the XDG **GlobalShortcuts portal** instead, as app id
+`com.github.spotify-control`. It writes a hidden `com.github.spotify-control.desktop` into
+`~/.local/share/applications` first, since the portal refuses an app id without one.
+
+- **KDE Plasma, GNOME 48+**: the configured bindings are offered as preferred triggers; confirm
+  or change them in the dialog the desktop shows on first run.
+- **Hyprland**: the portal registers the actions but binds no keys. Bind them yourself:
+
+  ```lua
+  local SPOTIFY = "com.github.spotify-control:"
+  hl.bind("CONTROL + ALT + Right",         hl.dsp.global(SPOTIFY .. "volume_up"),      { repeating = true })
+  hl.bind("CONTROL + ALT + Left",          hl.dsp.global(SPOTIFY .. "volume_down"),    { repeating = true })
+  hl.bind("CONTROL + ALT + Home",          hl.dsp.global(SPOTIFY .. "play_pause"))
+  hl.bind("CONTROL + SHIFT + ALT + Right", hl.dsp.global(SPOTIFY .. "next_track"))
+  hl.bind("CONTROL + SHIFT + ALT + Left",  hl.dsp.global(SPOTIFY .. "previous_track"))
+  ```
+
+  or, with a `hyprland.conf`, `bind = CTRL ALT, Right, global, com.github.spotify-control:volume_up`
+  and so on. `hyprctl globalshortcuts` lists what the daemon registered.
+
+Compositors without the portal (sway, for one) are not supported. The on-screen readout is
+Windows-only.
 
 ## Development
 

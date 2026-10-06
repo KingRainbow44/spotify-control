@@ -4,7 +4,8 @@ use std::process::Command;
 
 pub const SERVICE_NAME: &str = "spotify-control";
 pub const WINDOWS_TASK_NAME: &str = "SpotifyControl";
-pub const MACOS_LABEL: &str = "com.github.spotify-control";
+pub const APP_ID: &str = "com.github.spotify-control";
+pub const MACOS_LABEL: &str = APP_ID;
 
 fn exe_path() -> Result<PathBuf> {
     std::env::current_exe().context("could not determine the running executable's path")
@@ -58,7 +59,7 @@ pub fn windows_task_xml(exe: &str) -> String {
     <Priority>7</Priority>
     <RestartOnFailure>
       <Interval>PT1M</Interval>
-      <Count>3</Count>
+      <Count>255</Count>
     </RestartOnFailure>
   </Settings>
   <Actions Context="Author">
@@ -107,12 +108,15 @@ pub fn linux_unit(exe: &str) -> String {
          Description=Global Spotify playback hotkeys\n\
          After=graphical-session.target\n\
          PartOf=graphical-session.target\n\
+         StartLimitIntervalSec=0\n\
          \n\
          [Service]\n\
          Type=simple\n\
          ExecStart={exe} run\n\
-         Restart=on-failure\n\
-         RestartSec=5\n\
+         Restart=always\n\
+         RestartSec=2\n\
+         RestartSteps=10\n\
+         RestartMaxDelaySec=10\n\
          \n\
          [Install]\n\
          WantedBy=graphical-session.target\n"
@@ -268,16 +272,19 @@ pub fn install() -> Result<String> {
     let _ = Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .output();
-    let out = Command::new("systemctl")
-        .args(["--user", "enable", "--now", SERVICE_NAME])
-        .output()
-        .context("could not run systemctl")?;
+    // Restart rather than `enable --now`, so a reinstall picks up a new binary.
+    for verb in ["enable", "restart"] {
+        let out = Command::new("systemctl")
+            .args(["--user", verb, SERVICE_NAME])
+            .output()
+            .context("could not run systemctl")?;
 
-    if !out.status.success() {
-        bail!(
-            "systemctl enable failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        if !out.status.success() {
+            bail!(
+                "systemctl {verb} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
     }
     Ok(format!("Installed and started systemd user unit at {}.", path.display()))
 }
@@ -356,11 +363,18 @@ mod tests {
     }
 
     #[test]
-    fn linux_unit_starts_the_daemon_and_restarts_on_failure() {
+    fn linux_unit_starts_the_daemon_and_always_restarts_it() {
         let unit = linux_unit("/home/me/.cargo/bin/spotify-control");
         assert!(unit.contains("ExecStart=/home/me/.cargo/bin/spotify-control run"));
-        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("Restart=always"));
+        // systemd otherwise gives up after five quick failures.
+        assert!(unit.contains("StartLimitIntervalSec=0"));
         assert!(unit.contains("WantedBy=graphical-session.target"));
+    }
+
+    #[test]
+    fn windows_task_keeps_restarting_after_failures() {
+        assert!(windows_task_xml("x.exe").contains("<Count>255</Count>"));
     }
 
     #[test]
