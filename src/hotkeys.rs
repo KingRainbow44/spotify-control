@@ -347,7 +347,7 @@ mod tests {
     use global_hotkey::hotkey::{Code, Modifiers};
 
     const CTRL_ALT: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT);
-    const CTRL_ALT_SHIFT: Modifiers = CTRL_ALT.union(Modifiers::SHIFT);
+    const CTRL_ALT_SUPER: Modifiers = CTRL_ALT.union(Modifiers::SUPER);
 
     #[test]
     fn all_five_bindings_are_present() {
@@ -369,14 +369,14 @@ mod tests {
         assert_eq!(map[&Action::PlayPause].mods, CTRL_ALT);
 
         assert_eq!(map[&Action::NextTrack].key, Code::ArrowRight);
-        assert_eq!(map[&Action::NextTrack].mods, CTRL_ALT_SHIFT);
+        assert_eq!(map[&Action::NextTrack].mods, CTRL_ALT_SUPER);
 
         assert_eq!(map[&Action::PreviousTrack].key, Code::ArrowLeft);
-        assert_eq!(map[&Action::PreviousTrack].mods, CTRL_ALT_SHIFT);
+        assert_eq!(map[&Action::PreviousTrack].mods, CTRL_ALT_SUPER);
     }
 
     #[test]
-    fn plain_and_shift_variants_stay_distinguishable() {
+    fn plain_and_super_variants_stay_distinguishable() {
         // The ids derive from (mods, key), so the arrow-key pairs must differ —
         // otherwise volume and track-skip would be indistinguishable at dispatch.
         let map: HashMap<Action, HotKey> = default_bindings().into_iter().collect();
@@ -395,22 +395,24 @@ mod tests {
     }
 
     #[test]
-    fn shift_modifier_is_only_on_track_bindings() {
+    fn super_modifier_is_only_on_track_bindings() {
         for (action, hotkey) in default_bindings() {
-            let has_shift = hotkey.mods.contains(Modifiers::SHIFT);
+            let has_super = hotkey.mods.contains(Modifiers::SUPER);
             let expected = matches!(action, Action::NextTrack | Action::PreviousTrack);
-            assert_eq!(has_shift, expected, "wrong SHIFT modifier on {action:?}");
-            // Hyprland setups put window moves on SUPER + CTRL + ALT + arrows.
-            assert!(!hotkey.mods.contains(Modifiers::SUPER), "SUPER on {action:?}");
+            assert_eq!(has_super, expected, "wrong SUPER modifier on {action:?}");
         }
     }
 
     #[test]
-    fn accepts_super_and_cmd_spellings_of_the_super_key() {
+    fn accepts_win_and_cmd_spellings_of_the_super_key() {
+        let ctrl_alt_super_right = default_bindings()
+            .into_iter()
+            .find(|(a, _)| *a == Action::NextTrack)
+            .unwrap()
+            .1;
         for spec in ["Ctrl+Super+Alt+ArrowRight", "Ctrl+Cmd+Alt+ArrowRight"] {
             let parsed: HotKey = spec.parse().unwrap_or_else(|e| panic!("{spec}: {e}"));
-            assert_eq!(parsed.key, Code::ArrowRight, "{spec}");
-            assert_eq!(parsed.mods, CTRL_ALT.union(Modifiers::SUPER), "{spec}");
+            assert_eq!(parsed.id(), ctrl_alt_super_right.id(), "{spec}");
         }
     }
 
@@ -427,7 +429,7 @@ mod tests {
         let b = Bindings::default();
         assert_eq!(xdg_trigger(&b.volume_up).as_deref(), Some("CTRL+ALT+Right"));
         assert_eq!(xdg_trigger(&b.play_pause).as_deref(), Some("CTRL+ALT+Home"));
-        assert_eq!(xdg_trigger(&b.previous_track).as_deref(), Some("CTRL+ALT+SHIFT+Left"));
+        assert_eq!(xdg_trigger(&b.previous_track).as_deref(), Some("CTRL+ALT+LOGO+Left"));
     }
 
     #[test]

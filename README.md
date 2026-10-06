@@ -17,10 +17,10 @@ Primary target is Windows; macOS and Linux (X11 and Wayland) are supported.
 | `Ctrl` + `Alt` + `Right` | Volume up |
 | `Ctrl` + `Alt` + `Left` | Volume down |
 | `Ctrl` + `Alt` + `Home` | Play / pause |
-| `Ctrl` + `Shift` + `Alt` + `Right` | Next track |
-| `Ctrl` + `Shift` + `Alt` + `Left` | Previous track |
+| `Ctrl` + `Win` + `Alt` + `Right` | Next track |
+| `Ctrl` + `Win` + `Alt` + `Left` | Previous track |
 
-The bindings are claimed exclusively — while the daemon runs, other
+On macOS, `Win` is `Cmd`. The bindings are claimed exclusively — while the daemon runs, other
 applications will not receive them.
 
 If another app already holds one of these combinations (a launcher like Raycast, a graphics-driver
@@ -144,14 +144,14 @@ spotify-control run --verbose       # debug logging
     "volume_up": "Ctrl+Alt+ArrowRight",
     "volume_down": "Ctrl+Alt+ArrowLeft",
     "play_pause": "Ctrl+Alt+Home",
-    "next_track": "Ctrl+Shift+Alt+ArrowRight",
-    "previous_track": "Ctrl+Shift+Alt+ArrowLeft"
+    "next_track": "Ctrl+Super+Alt+ArrowRight",
+    "previous_track": "Ctrl+Super+Alt+ArrowLeft"
   }
 }
 ```
 
-`init` writes every binding out, so a `config.json` from an older version still has next/previous
-on `Ctrl+Super+Alt`. Change those two lines by hand to pick up the new defaults.
+`init` writes every binding out, so a `config.json` from an older version may still have
+next/previous on `Ctrl+Shift+Alt`. Change those two lines by hand to pick up the new defaults.
 
 Binding strings list modifiers first, joined by `+`. Recognised modifiers are `Ctrl`/`Control`,
 `Alt`, `Shift`, and `Super`/`Cmd`/`Command` (the Windows/Command key — `Win` is not accepted).
@@ -207,8 +207,8 @@ registers its actions with the XDG **GlobalShortcuts portal** instead, as app id
   hl.bind("CONTROL + ALT + Right",         hl.dsp.global(SPOTIFY .. "volume_up"),      { repeating = true })
   hl.bind("CONTROL + ALT + Left",          hl.dsp.global(SPOTIFY .. "volume_down"),    { repeating = true })
   hl.bind("CONTROL + ALT + Home",          hl.dsp.global(SPOTIFY .. "play_pause"))
-  hl.bind("CONTROL + SHIFT + ALT + Right", hl.dsp.global(SPOTIFY .. "next_track"))
-  hl.bind("CONTROL + SHIFT + ALT + Left",  hl.dsp.global(SPOTIFY .. "previous_track"))
+  hl.bind("SUPER + CONTROL + ALT + Right", hl.dsp.global(SPOTIFY .. "next_track"))
+  hl.bind("SUPER + CONTROL + ALT + Left",  hl.dsp.global(SPOTIFY .. "previous_track"))
   ```
 
   or, with a `hyprland.conf`, `bind = CTRL ALT, Right, global, com.github.spotify-control:volume_up`

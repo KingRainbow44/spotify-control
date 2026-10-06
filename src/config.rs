@@ -44,10 +44,10 @@ fn default_play_pause() -> String {
     "Ctrl+Alt+Home".into()
 }
 fn default_next_track() -> String {
-    "Ctrl+Shift+Alt+ArrowRight".into()
+    "Ctrl+Super+Alt+ArrowRight".into()
 }
 fn default_previous_track() -> String {
-    "Ctrl+Shift+Alt+ArrowLeft".into()
+    "Ctrl+Super+Alt+ArrowLeft".into()
 }
 
 impl Default for Bindings {
